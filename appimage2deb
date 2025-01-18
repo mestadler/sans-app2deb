@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Enable error handling
+set -e
+
+# Trap signals to clean up temporary directories
+trap 'rm -rf "${WORKDIR}"; exit 1' INT TERM EXIT
+
 ###### appimage2deb: convert appimages to debain packaging
 ### Why ###
 # I want to manage all applications with the debian package manager
@@ -9,6 +15,8 @@
 ### ToDO ###
 # remove the need for the optarg's and use my .bashrc deb and git variables
 # add scanning of the contents for malware, trackers, vulnrabilities, create sbom
+# add scanning of the contents for malware trackers, vulnrabilities, create sbom
+# add scanning of the contents for malware trackers, vulnrabilities, create sbom
 # add semantic versioning for sansnom and sign with sansnom gpg
 #
 ### Depends on ###
@@ -27,18 +35,10 @@ usage() {
 # Parse command line arguments
 while getopts "a:m:d:" opt; do
     case "${opt}" in
-        a)
-            APPIMAGE_PATH=${OPTARG}
-            ;;
-        m)
-            MAINTAINER=${OPTARG}
-            ;;
-        d)
-            DESCRIPTION=${OPTARG}
-            ;;
-        *)
-            usage
-            ;;
+        a) APPIMAGE_PATH="${OPTARG}";;
+        m) MAINTAINER="${OPTARG}";;
+        d) DESCRIPTION="${OPTARG}";;
+        *) usage;;
     esac
 done
 
@@ -56,21 +56,24 @@ fi
 # Fix the AppImage to have execute permissions
 chmod +x "${APPIMAGE_PATH}"
 
-
 # Create working directories
 SCRIPT_DIR=$(dirname "$(realpath "$0")")
 WORKDIR=$(mktemp -d)
 APPDIR=${WORKDIR}/AppDir
 DEBDIR=${WORKDIR}/deb
+APPDIR="${WORKDIR}/AppDir"
+DEBDIR="${WORKDIR}/deb"
 
 mkdir -p ${APPDIR} ${DEBDIR}/DEBIAN ${SCRIPT_DIR}/builds
+APPDIR="${WORKDIR}/AppDir"
+DEBDIR="${WORKDIR}/deb"
+mkdir -p "${APPDIR}" "${DEBDIR}/DEBIAN" "${SCRIPT_DIR}/builds"
 
+mkdir -p "${APPDIR}" "${DEBDIR}/DEBIAN" "${SCRIPT_DIR}/builds"
 # Extract the AppImage
-cd ${WORKDIR}
 "${APPIMAGE_PATH}" --appimage-extract
 
-# Check if extraction was successful
-if [ ! -d "squashfs-root" ]; then
+if [ $? -ne 0 ]; then
     echo "Error: Failed to extract AppImage."
     exit 1
 fi
@@ -78,7 +81,6 @@ fi
 # Extract metadata from the AppImage
 DESKTOP_FILE=$(find squashfs-root -name "*.desktop" | head -n 1)
 ICON_FILE=$(find squashfs-root -name ".DirIcon" | head -n 1)
-APP_NAME=$(grep -m 1 "^Name=" "${DESKTOP_FILE}" | cut -d '=' -f 2 | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]\-+')
 
 # Parse version and architecture from AppImage file name
 APPIMAGE_BASENAME=$(basename "${APPIMAGE_PATH}")
@@ -101,6 +103,7 @@ VERSION=${VERSION:-1.0.0}
 
 # Create control file
 cat <<EOL > ${DEBDIR}/DEBIAN/control
+cat <<EOL > "${DEBDIR}/DEBIAN/control"
 Package: ${APP_NAME}
 Version: ${VERSION}
 Section: utils
@@ -113,62 +116,87 @@ EOL
 
 # Create postinst script to handle AppImage integration
 cat <<EOL > ${DEBDIR}/DEBIAN/postinst
+cat <<EOL > "${DEBDIR}/DEBIAN/postinst"
 #!/bin/bash
 ln -s /opt/${APP_NAME}/${APP_NAME}_${VERSION}.AppImage /opt/${APP_NAME}/${APP_NAME}
 sudo chown root:root /opt/${APP_NAME}/${APP_NAME}_${VERSION}.AppImage /opt/${APP_NAME}/${APP_NAME}
 /usr/bin/update-desktop-database
 EOL
 chmod 755 ${DEBDIR}/DEBIAN/postinst
+chmod 755 "${DEBDIR}/DEBIAN/postinst"
 
 # Create prerm script to remove symlink
 cat <<EOL > ${DEBDIR}/DEBIAN/prerm
+cat <<EOL > "${DEBDIR}/DEBIAN/prerm"
 #!/bin/bash
 rm /opt/${APP_NAME}/${APP_NAME}
 /usr/bin/update-desktop-database
 EOL
 chmod 755 ${DEBDIR}/DEBIAN/prerm
+chmod 755 "${DEBDIR}/DEBIAN/prerm"
 
 # Copy AppImage to /opt
 mkdir -p ${DEBDIR}/opt/${APP_NAME}
 install -Dm755 ${APPIMAGE_PATH} ${DEBDIR}/opt/${APP_NAME}/${APP_NAME}_${VERSION}.AppImage
+mkdir -p "${DEBDIR}/opt/${APP_NAME}"
+install -Dm755 "${APPIMAGE_PATH}" "${DEBDIR}/opt/${APP_NAME}/${APP_NAME}_${VERSION}.AppImage"
 
+mkdir -p "${DEBDIR}/opt/${APP_NAME}"
+install -Dm755 "${APPIMAGE_PATH}" "${DEBDIR}/opt/${APP_NAME}/${APP_NAME}_${VERSION}.AppImage"
+mkdir -p "${DEBDIR}/opt/${APP_NAME}"
+install -Dm755 "${APPIMAGE_PATH}" "${DEBDIR}/opt/${APP_NAME}/${APP_NAME}_${VERSION}.AppImage"
 # Install icon
 if [ -n "${ICON_FILE}" ]; then
     ICON_DEST=${DEBDIR}/usr/share/icons/hicolor/256x256/apps/${APP_NAME}.png
     mkdir -p $(dirname ${ICON_DEST})
     install -Dm644 ${ICON_FILE} ${ICON_DEST}
+    ICON_DEST="${DEBDIR}/usr/share/icons/hicolor/256x256/apps/${APP_NAME}.png"
+    mkdir -p $(dirname "${ICON_DEST}")
+    install -Dm644 "${ICON_FILE}" "${ICON_DEST}"
+    ICON_DEST="${DEBDIR}/usr/share/icons/hicolor/256x256/apps/${APP_NAME}.png"
+    mkdir -p $(dirname "${ICON_DEST}")
+    install -Dm644 "${ICON_FILE}" "${ICON_DEST}"
+    ICON_DEST="${DEBDIR}/usr/share/icons/hicolor/256x256/apps/${APP_NAME}.png"
+    mkdir -p $(dirname "${ICON_DEST}")
+    install -Dm644 "${ICON_FILE}" "${ICON_DEST}"
 else
     echo "Icon: ${ICON_FILE} not found"
 fi
 
 # Create .desktop file for GNOME integration if not found
 if [ -z "${DESKTOP_FILE}" ]; then
-    DESKTOP_FILE="${WORKDIR}/${APP_NAME}.desktop"
-    cat <<EOL > ${DESKTOP_FILE}
-[Desktop Entry]
-Type=Application
-Name=${APP_NAME}
-Exec=/opt/${APP_NAME}/${APP_NAME}
-Icon=${APP_NAME}
-Terminal=false
-Categories=Utility;
-EOL
-fi
-
 # Install desktop file
 DESKTOP_DEST=${DEBDIR}/usr/share/applications/${APP_NAME}.desktop
 mkdir -p $(dirname ${DESKTOP_DEST})
 install -Dm644 ${DESKTOP_FILE} ${DESKTOP_DEST}
+DESKTOP_DEST="${DEBDIR}/usr/share/applications/${APP_NAME}.desktop"
+mkdir -p $(dirname "${DESKTOP_DEST}")
+install -Dm644 "${DESKTOP_FILE}" "${DESKTOP_DEST}"
+    DESKTOP_DEST="${DEBDIR}/usr/share/applications/${APP_NAME}.desktop"
+    mkdir -p $(dirname "${DESKTOP_DEST}")
+    install -Dm644 "${DESKTOP_FILE}" "${DESKTOP_DEST}"
 # Update Exec and Icon fields in the desktop file
 sed -i "s|^Exec=.*|Exec=/opt/${APP_NAME}/${APP_NAME}|" ${DESKTOP_DEST}
 sed -i "s|^Icon=.*|Icon=${APP_NAME}|" ${DESKTOP_DEST}
+    DESKTOP_DEST="${DEBDIR}/usr/share/applications/${APP_NAME}.desktop"
+    mkdir -p $(dirname "${DESKTOP_DEST}")
+    install -Dm644 "${DESKTOP_FILE}" "${DESKTOP_DEST}"
+sed -i "s|^Exec=.*|Exec=/opt/${APP_NAME}/${APP_NAME}|" "${DESKTOP_DEST}"
+sed -i "s|^Icon=.*|Icon=${APP_NAME}|" "${DESKTOP_DEST}"
 
-# Build the Debian package
-OUTPUT_PATH="${SCRIPT_DIR}/builds/${APP_NAME}_${VERSION}_${ARCH}.deb"
-dpkg-deb --build ${DEBDIR} "${OUTPUT_PATH}"
+    sed -i "s|^Exec=.*|Exec=/opt/${APP_NAME}/${APP_NAME}|" "${DESKTOP_DEST}"
+    sed -i "s|^Icon=.*|Icon=${APP_NAME}|" "${DESKTOP_DEST}"
+fi
 
 # Cleanup
 rm -rf ${WORKDIR}
+rm -rf "${WORKDIR}"
 
 echo "Debian package created successfully: ${OUTPUT_PATH}"
 
+
+
+
+
+
+echo "Debian package created successfully."
