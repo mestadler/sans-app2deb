@@ -1,6 +1,6 @@
 #!/bin/bash
 
-###### appimage2deb: convert appimages to debain packaging
+###### appimage2deb: convert appimages to debian packaging
 ### Why ###
 # I want to manage all applications with the debian package manager
 # I want to scan any app that is not directly from the debian repos
@@ -12,11 +12,146 @@
 # add semantic versioning for sansnom and sign with sansnom gpg
 #
 ### Depends on ###
-# install the following packages: libappimage-dev wget squashfs-tools dpkg-dev
+# install the following packages: libappimage-dev wget squashfs-tools dpkg-dev fakeroot
 #
 ### martin stadler martin@sansnom.co.uk 31072024 ###
 ######
 
+# Configuration
+REQUIRED_GROUP="builders"  # Change this to your preferred group name
+SYSTEM_CACHE="/var/cache/appimage2deb"
+
+# Function to check for required dependencies
+check_dependencies() {
+    local missing_deps=()
+    local required_tools=("dpkg-deb" "fakeroot" "grep" "sed" "find" "mktemp")
+    
+    for tool in "${required_tools[@]}"; do
+        if ! command -v "$tool" &> /dev/null; then
+            missing_deps+=("$tool")
+        fi
+    done
+    
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo "Error: Missing required dependencies: ${missing_deps[*]}"
+        echo "Install with: sudo apt install libappimage-dev wget squashfs-tools dpkg-dev fakeroot"
+        exit 1
+    fi
+}
+
+# Function to check group membership
+check_group_membership() {
+    local group="$1"
+    
+    # Check if the group exists on the system
+    if ! getent group "${group}" &> /dev/null; then
+        echo "=========================================="
+        echo "Error: Group '${group}' does not exist"
+        echo "=========================================="
+        echo "To create the group and add yourself, run:"
+        echo ""
+        echo "  sudo groupadd ${group}"
+        echo "  sudo usermod -aG ${group} $USER"
+        echo ""
+        echo "Then log out and log back in for changes to take effect."
+        echo "=========================================="
+        exit 1
+    fi
+    
+    # Check if current user is in the group
+    if ! groups | grep -q "\b${group}\b"; then
+        echo "=========================================="
+        echo "Error: You are not a member of the '${group}' group"
+        echo "=========================================="
+        echo "Current user: $USER"
+        echo "Current groups: $(groups)"
+        echo ""
+        echo "To add yourself to the group, run:"
+        echo ""
+        echo "  sudo usermod -aG ${group} $USER"
+        echo ""
+        echo "Then log out and log back in for changes to take effect."
+        echo "=========================================="
+        exit 1
+    fi
+    
+    echo "✓ User $USER is in group '${group}'"
+}
+
+# Function to setup system-wide cache directory
+setup_system_cache() {
+    local cache_dir="$1"
+    local group="$2"
+    
+    # Check if directory exists
+    if [ -d "${cache_dir}" ]; then
+        # Check if it's writable
+        if [ -w "${cache_dir}" ]; then
+            echo "✓ System cache directory exists and is writable: ${cache_dir}"
+            return 0
+        else
+            echo "Warning: System cache exists but is not writable: ${cache_dir}"
+            return 1
+        fi
+    fi
+    
+    # Directory doesn't exist, try to create it
+    echo "Setting up system-wide cache directory: ${cache_dir}"
+    echo "This requires sudo privileges..."
+    
+    if sudo mkdir -p "${cache_dir}"; then
+        # Set group ownership
+        if sudo chgrp "${group}" "${cache_dir}"; then
+            # Set permissions: 2775 (setgid, rwxrwxr-x)
+            if sudo chmod 2775 "${cache_dir}"; then
+                echo "✓ System cache directory created successfully: ${cache_dir}"
+                echo "  - Owner: root"
+                echo "  - Group: ${group}"
+                echo "  - Permissions: 2775 (drwxrwsr-x)"
+                return 0
+            fi
+        fi
+    fi
+    
+    echo "Warning: Failed to setup system cache directory"
+    return 1
+}
+
+# Function to determine appropriate builds directory
+get_builds_directory() {
+    local group="$1"
+    local user_cache="${HOME}/.cache/appimage2deb"
+    local cwd_builds="$(pwd)/builds"
+    
+    # Check if system cache exists and is writable
+    if [ -d "${SYSTEM_CACHE}" ] && [ -w "${SYSTEM_CACHE}" ]; then
+        echo "${SYSTEM_CACHE}"
+        return 0
+    fi
+    
+    # Try to use user cache (fallback for non-root builds)
+    if [ -w "${HOME}/.cache" ] || [ -w "${HOME}" ]; then
+        mkdir -p "${user_cache}" 2>/dev/null
+        if [ -d "${user_cache}" ]; then
+            echo "Note: Using user cache instead of system cache: ${user_cache}"
+            echo "${user_cache}"
+            return 0
+        fi
+    fi
+    
+    # Fallback to current working directory
+    echo "Note: Using current directory for builds: ${cwd_builds}"
+    echo "${cwd_builds}"
+}
+
+# Check dependencies before doing anything else
+check_dependencies
+
+# Check group membership
+check_group_membership "${REQUIRED_GROUP}"
+
+# Setup system-wide cache (only runs once per system)
+setup_system_cache "${SYSTEM_CACHE}" "${REQUIRED_GROUP}"
 
 # Function to remind me how to use this script
 usage() {
@@ -56,14 +191,29 @@ fi
 # Fix the AppImage to have execute permissions
 chmod +x "${APPIMAGE_PATH}"
 
+# Determine builds directory using FHS-compliant locations
+BUILDS_DIR=$(get_builds_directory "${REQUIRED_GROUP}")
 
 # Create working directories
-SCRIPT_DIR=$(dirname "$(realpath "$0")")
 WORKDIR=$(mktemp -d)
 APPDIR=${WORKDIR}/AppDir
 DEBDIR=${WORKDIR}/deb
 
-mkdir -p ${APPDIR} ${DEBDIR}/DEBIAN ${SCRIPT_DIR}/builds
+# Setup cleanup trap to ensure temp directories are always removed
+cleanup() {
+    if [ -d "${WORKDIR}" ]; then
+        echo "Cleaning up temporary files..."
+        rm -rf "${WORKDIR}"
+    fi
+}
+trap cleanup EXIT ERR INT TERM
+
+mkdir -p ${APPDIR} ${DEBDIR}/DEBIAN ${BUILDS_DIR}
+
+echo ""
+echo "Building package..."
+echo "Output directory: ${BUILDS_DIR}"
+echo ""
 
 # Extract the AppImage
 cd ${WORKDIR}
@@ -114,17 +264,46 @@ EOL
 # Create postinst script to handle AppImage integration
 cat <<EOL > ${DEBDIR}/DEBIAN/postinst
 #!/bin/bash
-ln -s /opt/${APP_NAME}/${APP_NAME}_${VERSION}.AppImage /opt/${APP_NAME}/${APP_NAME}
-sudo chown root:root /opt/${APP_NAME}/${APP_NAME}_${VERSION}.AppImage /opt/${APP_NAME}/${APP_NAME}
-/usr/bin/update-desktop-database
+set -e
+
+# Create symlink in /opt for versioning
+ln -sf /opt/${APP_NAME}/${APP_NAME}_${VERSION}.AppImage /opt/${APP_NAME}/${APP_NAME}
+
+# Create symlink in /usr/local/bin for easy command-line access
+ln -sf /opt/${APP_NAME}/${APP_NAME} /usr/local/bin/${APP_NAME}
+
+# Set ownership to root (script runs as root during package installation)
+chown root:root /opt/${APP_NAME}/${APP_NAME}_${VERSION}.AppImage /opt/${APP_NAME}/${APP_NAME}
+
+# Set permissions: readable and executable by everyone
+chmod 0755 /opt/${APP_NAME}/${APP_NAME}_${VERSION}.AppImage /opt/${APP_NAME}/${APP_NAME}
+
+# Update desktop database
+if [ -x /usr/bin/update-desktop-database ]; then
+    /usr/bin/update-desktop-database -q
+fi
+
+exit 0
 EOL
 chmod 755 ${DEBDIR}/DEBIAN/postinst
 
-# Create prerm script to remove symlink
+# Create prerm script to remove symlinks
 cat <<EOL > ${DEBDIR}/DEBIAN/prerm
 #!/bin/bash
-rm /opt/${APP_NAME}/${APP_NAME}
-/usr/bin/update-desktop-database
+set -e
+
+# Remove symlink from /usr/local/bin
+rm -f /usr/local/bin/${APP_NAME}
+
+# Remove symlink from /opt
+rm -f /opt/${APP_NAME}/${APP_NAME}
+
+# Update desktop database
+if [ -x /usr/bin/update-desktop-database ]; then
+    /usr/bin/update-desktop-database -q
+fi
+
+exit 0
 EOL
 chmod 755 ${DEBDIR}/DEBIAN/prerm
 
@@ -163,12 +342,20 @@ install -Dm644 ${DESKTOP_FILE} ${DESKTOP_DEST}
 sed -i "s|^Exec=.*|Exec=/opt/${APP_NAME}/${APP_NAME}|" ${DESKTOP_DEST}
 sed -i "s|^Icon=.*|Icon=${APP_NAME}|" ${DESKTOP_DEST}
 
-# Build the Debian package
-OUTPUT_PATH="${SCRIPT_DIR}/builds/${APP_NAME}_${VERSION}_${ARCH}.deb"
-dpkg-deb --build ${DEBDIR} "${OUTPUT_PATH}"
+# Build the Debian package using fakeroot (allows non-root build)
+# Add --root-owner-group to ensure all files are owned by root:root in the package
+OUTPUT_PATH="${BUILDS_DIR}/${APP_NAME}_${VERSION}_${ARCH}.deb"
+fakeroot dpkg-deb --root-owner-group --build ${DEBDIR} "${OUTPUT_PATH}"
 
-# Cleanup
+# If we get here, the build was successful, so we can remove the WORKDIR manually
+# The trap will still run, but the directory will already be gone
 rm -rf ${WORKDIR}
 
-echo "Debian package created successfully: ${OUTPUT_PATH}"
-
+echo ""
+echo "=========================================="
+echo "Debian package created successfully!"
+echo "=========================================="
+echo "Package: ${OUTPUT_PATH}"
+echo "Install with: sudo dpkg -i ${OUTPUT_PATH}"
+echo "After installation, run with: ${APP_NAME}"
+echo "=========================================="
